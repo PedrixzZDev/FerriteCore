@@ -8,65 +8,41 @@ import org.jetbrains.annotations.Nullable;
 import java.util.*;
 
 /**
- * Maps a Property->Value assignment to a value, while allowing fast access to "neighbor" states
+ * Maps a Property->Value assignment to a value, while allowing fast access to "neighbor" states.
+ * Optimized to deduplicate metadata across blocks with identical property sets and use arrays for storage.
  */
 public class FastMap<Value> {
     private static final int INVALID_INDEX = -1;
+    // Cache for shared metadata to deduplicate keys and maps across similar blocks (e.g. all Stairs share the same structure)
+    private static final Map<IdentityListKey, SharedData> CACHE = new HashMap<>();
 
-    private final List<FastMapKey<?>> keys;
-    private final List<Value> valueMatrix;
-    // It might be possible to get rid of this (and the equivalent map for values) by sorting the key vectors by
-    // property name (natural order for values) and using a binary search above a given size, but choosing that size
-    // would likely be more effort than it's worth
-    private final Reference2IntMap<Property<?>> toKeyIndex;
-    private final ReferenceSet<Property<?>> propertySet;
+    private final SharedData sharedData;
+    private final Value[] valueMatrix;
 
+    @SuppressWarnings("unchecked")
     public FastMap(
             Collection<Property<?>> properties, Map<Map<Property<?>, Comparable<?>>, Value> valuesMap, boolean compact
     ) {
-        List<FastMapKey<?>> keys = new ArrayList<>(properties.size());
-        int factorUpTo = 1;
-        if (useArrayMapForSize(properties.size())) {
-            this.toKeyIndex = new Reference2IntArrayMap<>();
-        } else {
-            this.toKeyIndex = new Reference2IntOpenHashMap<>();
-        }
-        this.toKeyIndex.defaultReturnValue(INVALID_INDEX);
-        for (Property<?> prop : properties) {
-            this.toKeyIndex.put(prop, keys.size());
-            FastMapKey<?> nextKey;
-            if (compact) {
-                nextKey = new CompactFastMapKey<>(prop, factorUpTo);
-            } else {
-                nextKey = new BinaryFastMapKey<>(prop, factorUpTo);
-            }
-            keys.add(nextKey);
-            factorUpTo *= nextKey.getFactorToNext();
-        }
-        this.keys = ImmutableList.copyOf(keys);
+        // Snapshot the properties into a list to ensure stable order and access
+        List<Property<?>> propList = ImmutableList.copyOf(properties);
+        IdentityListKey cacheKey = new IdentityListKey(propList, compact);
 
-        List<Value> valuesList = new ArrayList<>(factorUpTo);
-        for (int i = 0; i < factorUpTo; ++i) {
-            valuesList.add(null);
+        // Get or create the shared metadata for this property set configuration
+        synchronized (CACHE) {
+            this.sharedData = CACHE.computeIfAbsent(cacheKey, k -> new SharedData(k.list, k.compact));
         }
+
+        // Allocate the value matrix as a raw array to save memory compared to ArrayList
+        this.valueMatrix = (Value[]) new Object[sharedData.matrixSize];
+        
+        // Populate the matrix
         for (Map.Entry<Map<Property<?>, Comparable<?>>, Value> state : valuesMap.entrySet()) {
-            valuesList.set(getIndexOf(state.getKey()), state.getValue());
-        }
-        this.valueMatrix = Collections.unmodifiableList(valuesList);
-        if (useArrayMapForSize(properties.size())) {
-            this.propertySet = new ReferenceArraySet<>(properties);
-        } else {
-            this.propertySet = new ReferenceOpenHashSet<>(properties);
+            this.valueMatrix[getIndexOf(state.getKey())] = state.getValue();
         }
     }
 
     /**
      * Computes the value for a neighbor state
-     *
-     * @param oldIndex The original state index
-     * @param prop     The property to be replaced
-     * @param value    The new value of this property
-     * @return The value corresponding to the specified neighbor, or null if value is not a valid value for prop
      */
     @Nullable
     public Value with(int oldIndex, Property<?> prop, Object value) {
@@ -81,7 +57,7 @@ public class FastMap<Value> {
         if (newIndex < 0) {
             return null;
         }
-        return valueMatrix.get(newIndex);
+        return valueMatrix[newIndex];
     }
 
     /**
@@ -89,7 +65,7 @@ public class FastMap<Value> {
      */
     public int getIndexOf(Map<Property<?>, Comparable<?>> state) {
         int id = 0;
-        for (FastMapKey<?> k : keys) {
+        for (FastMapKey<?> k : sharedData.keys) {
             id += k.toPartialMapIndex(state.get(k.getProperty()));
         }
         return id;
@@ -97,10 +73,6 @@ public class FastMap<Value> {
 
     /**
      * Returns the value assigned to a property at a given map index
-     *
-     * @param stateIndex The map index for the assignment to check
-     * @param property   The property to retrieve
-     * @return The value of the property or null if the state if not present
      */
     @Nullable
     public <T extends Comparable<T>>
@@ -122,17 +94,18 @@ public class FastMap<Value> {
     }
 
     public int numProperties() {
-        return keys.size();
+        return sharedData.keys.size();
     }
 
     public FastMapKey<?> getKey(int keyIndex) {
-        return keys.get(keyIndex);
+        return sharedData.keys.get(keyIndex);
     }
 
     @Nullable
+    @SuppressWarnings("unchecked")
     public <T extends Comparable<T>>
     FastMapKey<T> getKeyFor(Property<T> prop) {
-        int index = toKeyIndex.getInt(prop);
+        int index = sharedData.toKeyIndex.getInt(prop);
         if (index == INVALID_INDEX) {
             return null;
         } else {
@@ -141,14 +114,97 @@ public class FastMap<Value> {
     }
 
     public ReferenceSet<Property<?>> getPropertySet() {
-        return propertySet;
+        return sharedData.propertySet;
     }
 
     public Value getStateByIndex(int neighborIndex) {
-        return valueMatrix.get(neighborIndex);
+        return valueMatrix[neighborIndex];
     }
 
     private static boolean useArrayMapForSize(int numElements) {
         return numElements < 5;
+    }
+
+    /**
+     * Holds the structural data for a FastMap.
+     * This is immutable and deduplicated across all blocks sharing the same properties.
+     */
+    private static class SharedData {
+        final List<FastMapKey<?>> keys;
+        final Reference2IntMap<Property<?>> toKeyIndex;
+        final ReferenceSet<Property<?>> propertySet;
+        final int matrixSize;
+
+        SharedData(List<Property<?>> properties, boolean compact) {
+            List<FastMapKey<?>> keysList = new ArrayList<>(properties.size());
+            int factorUpTo = 1;
+            
+            if (useArrayMapForSize(properties.size())) {
+                this.toKeyIndex = new Reference2IntArrayMap<>();
+            } else {
+                this.toKeyIndex = new Reference2IntOpenHashMap<>();
+            }
+            this.toKeyIndex.defaultReturnValue(INVALID_INDEX);
+
+            for (Property<?> prop : properties) {
+                this.toKeyIndex.put(prop, keysList.size());
+                FastMapKey<?> nextKey;
+                if (compact) {
+                    nextKey = new CompactFastMapKey<>(prop, factorUpTo);
+                } else {
+                    nextKey = new BinaryFastMapKey<>(prop, factorUpTo);
+                }
+                keysList.add(nextKey);
+                factorUpTo *= nextKey.getFactorToNext();
+            }
+            this.keys = ImmutableList.copyOf(keysList);
+            this.matrixSize = factorUpTo;
+
+            if (useArrayMapForSize(properties.size())) {
+                this.propertySet = new ReferenceArraySet<>(properties);
+            } else {
+                this.propertySet = new ReferenceOpenHashSet<>(properties);
+            }
+        }
+    }
+
+    /**
+     * Key used to cache SharedData.
+     * Uses identity comparison for the property list elements to ensure safety.
+     */
+    private static class IdentityListKey {
+        private final List<Property<?>> list;
+        private final boolean compact;
+        private final int hash;
+
+        public IdentityListKey(List<Property<?>> list, boolean compact) {
+            this.list = list;
+            this.compact = compact;
+            // Precompute hash code based on identity
+            int h = (compact ? 1 : 0);
+            for (Property<?> p : list) {
+                h = 31 * h + System.identityHashCode(p);
+            }
+            this.hash = h;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof IdentityListKey)) return false;
+            IdentityListKey that = (IdentityListKey) o;
+            if (compact != that.compact || hash != that.hash) return false;
+            if (list.size() != that.list.size()) return false;
+            // Strict identity check for properties
+            for (int i = 0; i < list.size(); i++) {
+                if (list.get(i) != that.list.get(i)) return false;
+            }
+            return true;
+        }
+
+        @Override
+        public int hashCode() {
+            return hash;
+        }
     }
 }
