@@ -2,7 +2,9 @@ package malte0811.ferritecore.impl;
 
 import com.google.common.base.Suppliers;
 import it.unimi.dsi.fastutil.booleans.BooleanArrays;
+import it.unimi.dsi.fastutil.doubles.DoubleList;
 import it.unimi.dsi.fastutil.objects.Object2ObjectOpenCustomHashMap;
+import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
 import malte0811.ferritecore.ducks.BlockStateCacheAccess;
 import malte0811.ferritecore.hash.ArrayVoxelShapeHash;
 import malte0811.ferritecore.hash.VoxelShapeHash;
@@ -29,6 +31,9 @@ public class BlockStateCacheImpl {
     public static final Map<boolean[], boolean[]> CACHE_FACE_STURDY = new Object2ObjectOpenCustomHashMap<>(
             BooleanArrays.HASH_STRATEGY
     );
+    // NEW: Cache para listas de coordenadas (DoubleList) usadas internamente por ArrayVoxelShape.
+    // Isso economiza memória ao compartilhar listas idênticas (ex: grades de coordenadas padrão) entre diferentes formas.
+    public static final Map<DoubleList, DoubleList> CACHE_POINT_LISTS = new Object2ObjectOpenHashMap<>();
 
     // Get the cache from a blockstate. Mixin does not handle private inner classes too well, so method handles and
     // manual remapping it is
@@ -80,11 +85,25 @@ public class BlockStateCacheImpl {
         } else {
             dedupedCollisionShape = newCache.getCollisionShape();
             if (dedupedCollisionShape instanceof ArrayVSAccess access) {
+                // NEW: Deduplica as listas internas de pontos antes de deduplicar a forma em si.
+                deduplicatePointLists(access);
                 dedupedCollisionShape = (VoxelShape) CACHE_COLLIDE.computeIfAbsent(access, Function.identity());
             }
         }
         replaceInternals(dedupedCollisionShape, newCache.getCollisionShape());
         newCache.setCollisionShape(dedupedCollisionShape);
+    }
+
+    private static void deduplicatePointLists(ArrayVSAccess access) {
+        access.setXPoints(deduplicate(access.getXPoints()));
+        access.setYPoints(deduplicate(access.getYPoints()));
+        access.setZPoints(deduplicate(access.getZPoints()));
+    }
+
+    private static DoubleList deduplicate(DoubleList list) {
+        if (list == null) return null;
+        // DoubleList implementa equals/hashCode baseado no conteúdo, então podemos usar um mapa padrão
+        return CACHE_POINT_LISTS.computeIfAbsent(list, Function.identity());
     }
 
     private static void deduplicateFaceSturdyArray(
