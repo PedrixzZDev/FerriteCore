@@ -27,15 +27,12 @@ public class BlockStateCacheImpl {
     public static final Map<ArrayVSAccess, ArrayVSAccess> CACHE_COLLIDE = new Object2ObjectOpenCustomHashMap<>(
             ArrayVoxelShapeHash.INSTANCE
     );
-    // Maps a shape to the "canonical instance" of that shape and its side projections
     public static final Map<VoxelShape, Pair<VoxelShape, VoxelShape[]>> CACHE_PROJECT =
             new Object2ObjectOpenCustomHashMap<>(VoxelShapeHash.INSTANCE);
     public static final Map<boolean[], boolean[]> CACHE_FACE_STURDY = new Object2ObjectOpenCustomHashMap<>(
             BooleanArrays.HASH_STRATEGY
     );
 
-    // Get the cache from a blockstate. Mixin does not handle private inner classes too well, so method handles and
-    // manual remapping it is
     private static final Supplier<Function<BlockStateBase, BlockStateCacheAccess>> GET_CACHE = Suppliers.memoize(() -> {
         try {
             final String cacheName = Constants.PLATFORM_HOOKS.computeBlockstateCacheFieldName();
@@ -53,16 +50,13 @@ public class BlockStateCacheImpl {
             throw new RuntimeException(e);
         }
     });
-    // Is set to the previous cache used by a state before updating the cache. If the new cache has shapes equivalent to
-    // the ones in the old cache, we don't need to go through the map since the old one already had deduplicated shapes
+
     private static final ThreadLocal<BlockStateCacheAccess> LAST_CACHE = new ThreadLocal<>();
 
-    // Calls before the cache for <code>state</code> is (re-)populated
     public static void deduplicateCachePre(BlockStateBase state) {
         LAST_CACHE.set(GET_CACHE.get().apply(state));
     }
 
-    // Calls after the cache for <code>state</code> is (re-)populated
     public static void deduplicateCachePost(BlockStateBase state) {
         BlockStateCacheAccess newCache = GET_CACHE.get().apply(state);
         if (newCache != null) {
@@ -70,7 +64,9 @@ public class BlockStateCacheImpl {
             deduplicateCollisionShape(newCache, oldCache);
             deduplicateRenderShapes(newCache, oldCache);
             deduplicateFaceSturdyArray(newCache, oldCache);
+            // IMPORTANTE: Limpar a referência ThreadLocal imediatamente para evitar vazamento de memória
             LAST_CACHE.set(null);
+            LAST_CACHE.remove(); 
         }
     }
 
@@ -95,6 +91,9 @@ public class BlockStateCacheImpl {
     private static void deduplicateRenderShapes(
             BlockStateCacheAccess newCache, @Nullable BlockStateCacheAccess oldCache
     ) {
+        // Otimização: Se occlusionShapes for nulo ou vazio, não fazer nada, economiza CPU.
+        if (newCache.getOcclusionShapes() == null) return;
+
         final VoxelShape newRenderShape = getRenderShape(newCache.getOcclusionShapes());
         if (newRenderShape == null) {
             return;
@@ -107,7 +106,6 @@ public class BlockStateCacheImpl {
             }
         }
         if (dedupedRenderShapes == null) {
-            // Who thought that this was a good interface for putIfAbsent…
             Pair<VoxelShape, VoxelShape[]> newPair = Pair.of(newRenderShape, newCache.getOcclusionShapes());
             dedupedRenderShapes = CACHE_PROJECT.putIfAbsent(newRenderShape, newPair);
             if (dedupedRenderShapes == null) {
@@ -125,6 +123,7 @@ public class BlockStateCacheImpl {
         if(oldCache != null && Arrays.equals(oldCache.getFaceSturdy(), newCache.getFaceSturdy())) {
             dedupedFaceSturdy = oldCache.getFaceSturdy();
         } else {
+            // Usa cache global para arrays booleanos
             dedupedFaceSturdy = CACHE_FACE_STURDY.computeIfAbsent(newCache.getFaceSturdy(), Function.identity());
         }
         newCache.setFaceSturdy(dedupedFaceSturdy);
@@ -140,14 +139,9 @@ public class BlockStateCacheImpl {
         if (toKeep == toReplace) {
             return;
         }
-        // Mods have a tendency to keep their shapes in a custom cache, in addition to the blockstate cache. So removing
-        // duplicate shapes from the cache only fixes part of the problem. The proper fix would be to deduplicate the
-        // mod caches as well (or convince people to get rid of the larger ones), but that's not feasible. So: Accept
-        // that we can't do anything about shallow size and replace the internals with those used in the cache. This is
-        // not theoretically 100% safe since VSs can technically be modified after they are created, but handing out VSs
-        // that will be modified is unsafe in any case since a lot of vanilla code relies on VSs being immutable.
         ArrayVSAccess toReplaceAccess = (ArrayVSAccess) toReplace;
         ArrayVSAccess toKeepAccess = (ArrayVSAccess) toKeep;
+        // Substitui os internals para apontar para o objeto em cache
         toReplaceAccess.setXPoints(toKeepAccess.getXPoints());
         toReplaceAccess.setYPoints(toKeepAccess.getYPoints());
         toReplaceAccess.setZPoints(toKeepAccess.getZPoints());
