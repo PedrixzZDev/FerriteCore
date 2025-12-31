@@ -31,12 +31,9 @@ public class BlockStateCacheImpl {
     public static final Map<boolean[], boolean[]> CACHE_FACE_STURDY = new Object2ObjectOpenCustomHashMap<>(
             BooleanArrays.HASH_STRATEGY
     );
-    // NEW: Cache para listas de coordenadas (DoubleList) usadas internamente por ArrayVoxelShape.
-    // Isso economiza memória ao compartilhar listas idênticas (ex: grades de coordenadas padrão) entre diferentes formas.
+    // Cache para listas de coordenadas (DoubleList) usadas internamente por ArrayVoxelShape.
     public static final Map<DoubleList, DoubleList> CACHE_POINT_LISTS = new Object2ObjectOpenHashMap<>();
 
-    // Get the cache from a blockstate. Mixin does not handle private inner classes too well, so method handles and
-    // manual remapping it is
     private static final Supplier<Function<BlockStateBase, BlockStateCacheAccess>> GET_CACHE = Suppliers.memoize(() -> {
         try {
             final String cacheName = Constants.PLATFORM_HOOKS.computeBlockstateCacheFieldName();
@@ -54,22 +51,22 @@ public class BlockStateCacheImpl {
             throw new RuntimeException(e);
         }
     });
-    // Is set to the previous cache used by a state before updating the cache. If the new cache has shapes equivalent to
-    // the ones in the old cache, we don't need to go through the map since the old one already had deduplicated shapes
+
     private static final ThreadLocal<BlockStateCacheAccess> LAST_CACHE = new ThreadLocal<>();
 
-    // Calls before the cache for <code>state</code> is (re-)populated
     public static void deduplicateCachePre(BlockStateBase state) {
         LAST_CACHE.set(GET_CACHE.get().apply(state));
     }
 
-    // Calls after the cache for <code>state</code> is (re-)populated
     public static void deduplicateCachePost(BlockStateBase state) {
         BlockStateCacheAccess newCache = GET_CACHE.get().apply(state);
         if (newCache != null) {
             final BlockStateCacheAccess oldCache = LAST_CACHE.get();
             deduplicateCollisionShape(newCache, oldCache);
             deduplicateFaceSturdyArray(newCache, oldCache);
+            
+            // GARANTIA DE LIMPEZA: Remove referência da thread para evitar memory leaks
+            LAST_CACHE.set(null);
             LAST_CACHE.remove();
         }
     }
@@ -85,7 +82,7 @@ public class BlockStateCacheImpl {
         } else {
             dedupedCollisionShape = newCache.getCollisionShape();
             if (dedupedCollisionShape instanceof ArrayVSAccess access) {
-                // NEW: Deduplica as listas internas de pontos antes de deduplicar a forma em si.
+                // Deduplica as listas internas antes de deduplicar a forma
                 deduplicatePointLists(access);
                 dedupedCollisionShape = (VoxelShape) CACHE_COLLIDE.computeIfAbsent(access, Function.identity());
             }
@@ -102,7 +99,6 @@ public class BlockStateCacheImpl {
 
     private static DoubleList deduplicate(DoubleList list) {
         if (list == null) return null;
-        // DoubleList implementa equals/hashCode baseado no conteúdo, então podemos usar um mapa padrão
         return CACHE_POINT_LISTS.computeIfAbsent(list, Function.identity());
     }
 
@@ -128,12 +124,6 @@ public class BlockStateCacheImpl {
         if (toKeep == toReplace) {
             return;
         }
-        // Mods have a tendency to keep their shapes in a custom cache, in addition to the blockstate cache. So removing
-        // duplicate shapes from the cache only fixes part of the problem. The proper fix would be to deduplicate the
-        // mod caches as well (or convince people to get rid of the larger ones), but that's not feasible. So: Accept
-        // that we can't do anything about shallow size and replace the internals with those used in the cache. This is
-        // not theoretically 100% safe since VSs can technically be modified after they are created, but handing out VSs
-        // that will be modified is unsafe in any case since a lot of vanilla code relies on VSs being immutable.
         ArrayVSAccess toReplaceAccess = (ArrayVSAccess) toReplace;
         ArrayVSAccess toKeepAccess = (ArrayVSAccess) toKeep;
         toReplaceAccess.setXPoints(toKeepAccess.getXPoints());
