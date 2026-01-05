@@ -29,7 +29,7 @@ public class FerriteConfig {
         NEIGHBOR_LOOKUP = builder.createOption("replaceNeighborLookup", "Replace the blockstate neighbor table");
         PROPERTY_MAP = builder.createOption(
                 "replacePropertyMap",
-                "Do not store the properties of a state explicitly and read them" +
+                "Do not store the properties of a state explicitly and read them " +
                         "from the replace neighbor table instead. Requires " + NEIGHBOR_LOOKUP.getName() + " to be enabled",
                 NEIGHBOR_LOOKUP
         );
@@ -43,43 +43,49 @@ public class FerriteConfig {
         );
         DEDUP_MULTIPART = builder.createOption(
                 "multipartDeduplication",
-                "Do not create a new MultipartBakedModel instance for each block state using the same multipart" +
+                "Do not create a new MultipartBakedModel instance for each block state using the same multipart " +
                         "model. Requires " + PREDICATES.getName() + " to be enabled",
                 PREDICATES
         );
+        
+        // Essential for RAM saving: Deduplicates collision and render shapes
         DEDUP_BLOCKSTATE_CACHE = builder.createOption(
                 "blockstateCacheDeduplication",
                 "Deduplicate cached data for blockstates, most importantly collision and render shapes"
         );
+        
+        // Essential for RAM saving: Deduplicates vertex data in memory
         DEDUP_QUADS = builder.createOption(
                 "bakedQuadDeduplication",
                 "Deduplicate vertex data of baked quads in the basic model implementations"
         );
+        
         MODEL_SIDES = builder.createOption(
                 "modelSides",
                 "Use smaller data structures for \"simple\" models, especially models with few side-specific faces"
         );
 
-        // --- OTIMIZAÇÃO PARA SERVIDOR 3GB RAM / 200% CPU ---
+        // --- OPTIMIZATION PROFILE: LOW RAM / HIGH CPU ---
 
-        // ATIVADO FORÇADO: Economiza muita RAM por chunk carregado.
-        // Essencial para versões modernas (1.18+).
-        THREADING_DETECTOR = builder.createOption(
-                "useSmallThreadingDetector",
-                "FORCE ENABLED: Replaces heavy objects with a byte field. Essential for low RAM servers."
-        );
-
-        // ATIVADO FORÇADO: Usa a sua CPU (200%) para compactar os dados na RAM.
-        // Trade-off perfeito para o seu caso.
+        // CPU Trade-off: Uses bit-packing/math (CPU) to save significant RAM (dense arrays vs sparse tables).
+        // Default changed to TRUE for this profile.
         COMPACT_FAST_MAP = builder.createOption(
                 "compactFastMap",
-                "FORCE ENABLED: Uses CPU math to compress block state arrays in RAM."
+                "Uses CPU math to compress block state arrays in RAM. Recommended for systems with available CPU."
         );
 
-        // MANTIDO DESATIVADO: Popular essa tabela gasta RAM inútil.
+        // Replaces vanilla ThreadingDetector objects (heavy) with a byte field. 
+        // Essential for saving RAM per loaded chunk section.
+        THREADING_DETECTOR = builder.createOption(
+                "useSmallThreadingDetector",
+                "Replaces heavy objects with a byte field. Essential for low RAM servers."
+        );
+
+        // Memory Waste: Do NOT enable this unless a specific mod crashes. 
+        // Populating the vanilla table duplicates data we already have in the FastMap.
         POPULATE_NEIGHBOR_TABLE = builder.createOptInOption(
                 "populateNeighborTable",
-                "Populate the neighbor table used by vanilla. Keep DISABLED to save RAM."
+                "Populate the neighbor table used by vanilla. Keep DISABLED to save RAM unless required for compatibility."
         );
         
         builder.finish();
@@ -89,14 +95,14 @@ public class FerriteConfig {
         private final List<Option> options = new ArrayList<>();
 
         public Option createOption(String name, String comment, Option... dependencies) {
-            // Força TRUE por padrão para otimização máxima
+            // Default: TRUE (Aggressive optimization)
             Option result = new Option(name, comment, true, dependencies);
             options.add(result);
             return result;
         }
 
         public Option createOptInOption(String name, String comment, Option... dependencies) {
-            // Força FALSE por padrão para opções pesadas
+            // Default: FALSE (Features that use extra RAM or are experimental)
             Option result = new Option(name, comment, false, dependencies);
             options.add(result);
             return result;
@@ -110,7 +116,6 @@ public class FerriteConfig {
                 throw new RuntimeException(e);
             }
 
-            // Lógica original de overrides mantida, mas nossas opções padrão agora são otimizadas
             Set<String> allOptions = options.stream().map(FerriteConfig.Option::getName).collect(Collectors.toSet());
             Set<String> disabledOptions = new HashSet<>();
             platformHooks.collectDisabledOverrides((disabledOption, modId) -> {
@@ -152,7 +157,6 @@ public class FerriteConfig {
             final boolean enabled = isEnabled.test(getName());
             if (enabled) {
                 for (Option dep : dependencies) {
-                    // Verificação relaxada para evitar crash se configs manuais estiverem erradas
                     if (!dep.isEnabled()) {
                         LOGGER.warn("Option {} enabled but dependency {} is disabled. This might cause issues.", getName(), dep.getName());
                     }
